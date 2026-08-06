@@ -1,0 +1,11 @@
+services:
+  backend:
+    ports:
+      - "127.0.0.1:8100:8100"
+  frontend:
+    ports:
+      - "127.0.0.1:3100:3100"
+  db:
+    ports: []
+  redis:
+    ports: []

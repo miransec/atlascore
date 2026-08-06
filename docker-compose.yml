@@ -1,0 +1,116 @@
+# =============================================================================
+# AtlasCore — Development Docker Compose
+# =============================================================================
+# Ports (non-standard to avoid conflicts):
+#   Frontend:    http://localhost:3100
+#   Backend API: http://localhost:8100
+#   PostgreSQL:  localhost:5433
+#   Redis:       localhost:6380
+#   API Docs:    http://localhost:8100/docs
+# =============================================================================
+
+name: atlascore
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 + pgvector
+  # ---------------------------------------------------------------------------
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: atlascore
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/docker/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d atlascore"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redis 7
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+
+  # ---------------------------------------------------------------------------
+  # Backend — FastAPI
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: dev
+    env_file:
+      - .env
+    environment:
+      # Override values for Docker networking (use service names as hosts)
+      DATABASE_URL: "postgresql+asyncpg://atlascore:change_in_production@db:5432/atlascore"
+      DATABASE_SYNC_URL: "postgresql://atlascore:change_in_production@db:5432/atlascore"
+      REDIS_URL: "redis://redis:6379/0"
+      BACKEND_HOST: "0.0.0.0"
+      BACKEND_PORT: "8100"
+      BACKEND_RELOAD: "true"
+      ALLOWED_ORIGINS: "http://localhost:3100"
+      APP_ENV: "development"
+      DEBUG: "true"
+    ports:
+      - "127.0.0.1:8100:8100"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8100/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Frontend — Next.js 16.2.x
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: dev
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: "http://localhost:8100"
+      NEXT_PUBLIC_APP_ENV: "development"
+      PORT: "3100"
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

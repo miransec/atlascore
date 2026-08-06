@@ -1,0 +1,75 @@
+# =============================================================================
+# AtlasCore — Isolated Test Stack
+# =============================================================================
+# Completely isolated from the dev stack:
+#   - Separate database (atlascore_test)
+#   - Separate Redis key prefix (test:)
+#   - No volume mounts of dev data
+#   - No host port exposure (tests connect via Docker network)
+# =============================================================================
+
+name: atlascore-test
+
+services:
+  # ---------------------------------------------------------------------------
+  # Test database — ephemeral, no persistent volume
+  # ---------------------------------------------------------------------------
+  test-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: atlascore_test
+    tmpfs:
+      - /var/lib/postgresql/data  # ephemeral — wiped between test runs
+    volumes:
+      - ./infra/docker/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d atlascore_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Test Redis — ephemeral
+  # ---------------------------------------------------------------------------
+  test-redis:
+    image: redis:7-alpine
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Test runner — runs pytest inside the backend image
+  # ---------------------------------------------------------------------------
+  test-runner:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: dev
+    env_file:
+      - .env.test
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://atlascore:change_in_production@test-db:5432/atlascore_test"
+      DATABASE_SYNC_URL: "postgresql://atlascore:change_in_production@test-db:5432/atlascore_test"
+      TEST_DATABASE_URL: "postgresql+asyncpg://atlascore:change_in_production@test-db:5432/atlascore_test"
+      REDIS_URL: "redis://test-redis:6379/0"
+      TEST_REDIS_KEY_PREFIX: "test:"
+      APP_ENV: "development"
+      DEBUG: "true"
+    depends_on:
+      test-db:
+        condition: service_healthy
+      test-redis:
+        condition: service_healthy
+    command: >
+      sh -c "
+        alembic upgrade head &&
+        pytest --cov=app tests/ -v
+      "
+    volumes:
+      - ./backend:/app

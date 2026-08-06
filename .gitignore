@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Node
+node_modules/
+.next/
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# Runtime / verification artifacts
+.verification-*/
+.final-verification/
+.repair-*/
+FINAL_VERIFICATION_REPORT*.md
+VERIFY_*.log
+VERIFY_*.pid
+
+# Logs
+*.log
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

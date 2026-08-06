@@ -1,0 +1,145 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "atlascore-backend"
+version = "0.1.0"
+description = "AtlasCore backend — secure enterprise AI operations platform"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Web framework
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.9",
+    # Database — async
+    "sqlalchemy[asyncio]>=2.0.36",
+    "alembic>=1.13.0",
+    "asyncpg>=0.30.0",
+    "pgvector>=0.3.5",
+    # Cache / queues
+    "redis[hiredis]>=5.2.0",
+    # Auth / crypto
+    "pwdlib[argon2]>=0.2.1",
+    "PyJWT>=2.9.0",
+    "cryptography>=43.0.0",
+    # HTTP client
+    "httpx>=0.27.0",
+    # Config / validation
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    # Serialisation
+    "orjson>=3.10.0",
+    "email-validator>=2.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=5.0.0",
+    "httpx>=0.27.0",
+    "faker>=30.0.0",
+    "factory-boy>=3.3.0",
+    "fakeredis>=2.26.0",
+    "anyio>=4.6.0",
+
+    # Linting / typing
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+    "sqlalchemy[mypy]>=2.0.36",
+
+    # Security audit
+    "pip-audit>=2.7.0",
+
+    # Type stubs
+    "types-passlib",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["app"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "UP",       # pyupgrade
+    "B",        # flake8-bugbear
+    "C4",       # flake8-comprehensions
+    "SIM",      # flake8-simplify
+    "TCH",      # flake8-type-checking
+    "RUF",      # ruff-specific
+]
+ignore = [
+    "B008",     # FastAPI Depends() in default args
+    "SIM108",   # ternary in type annotations
+    # TCH: all files have `from __future__ import annotations` so runtime
+    # evaluation of annotations is already deferred; moving imports into
+    # TYPE_CHECKING blocks provides no benefit and complicates code.
+    "TC001", "TC002", "TC003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use pytest.raises(Exception, ...) which triggers B017 (blind exception).
+# B904 (raise from) is intentional in test helpers that deliberately re-raise.
+# Tests often have long assertion message strings (E501).
+# B007: loop variables used only for unpacking are common in parametrised tests.
+# RUF005: list spread vs concat — both are clear in test context.
+# RUF043: regex in pytest.raises(match=...) — intentionally unescaped for readability.
+# RUF059: unused unpacked vars in multi-return fixture unpack are common in tests.
+"tests/**/*.py" = ["B007", "B017", "B904", "C408", "E501", "RUF005", "RUF043", "RUF059"]
+"tests/conftest.py" = ["E402"]
+# Seed and quality-gate scripts may have long strings and liberal exception handling.
+"scripts/**/*.py" = ["B017", "E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["sqlalchemy.ext.mypy.plugin", "pydantic.mypy"]
+exclude = ["alembic/", "tests/"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*", "pgvector.*", "fakeredis.*", "factory.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]
+markers = [
+    "rls: RLS isolation tests",
+    "auth: authentication tests",
+    "slow: slow integration tests",
+]
+
+# ---------------------------------------------------------------------------
+# coverage
+# ---------------------------------------------------------------------------
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+[tool.coverage.run]
+source = ["app"]
+omit = ["tests/*", "alembic/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
