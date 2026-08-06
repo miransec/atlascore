@@ -1,288 +1,320 @@
 # AtlasCore
 
-**Secure enterprise AI for knowledge, data and workflow automation**
+**Secure enterprise AI infrastructure for knowledge, retrieval, and grounded AI workflows.**
 
-AtlasCore is a multi-tenant enterprise AI operations platform.
-Organisations connect knowledge sources, company databases and approved tools,
-then use controlled AI agents to answer questions, analyse data and execute
-audited workflows — with human approval gates on every write action.
+AtlasCore is a multi-tenant platform for ingesting organisation knowledge, retrieving it under database-enforced access control, and answering questions only from retrieved evidence. It is designed so tenant isolation, authentication boundaries, and auditability are system properties—not prompt instructions.
 
----
-
-## What this is not
-
-- A ChatGPT clone or basic chatbot
-- A simple LangChain demonstration
-- An interface that only wraps an LLM API
-- A collection of disconnected agents
-- A fake dashboard with static data
+Current verified baseline: tag `phase-2d-complete` (`94b2946`).
 
 ---
 
-## What this is
+## Problem
 
-A production-quality platform with:
+Enterprise teams need AI systems that can use internal knowledge without:
 
-- **Multi-tenant isolation** — three independent layers (PostgreSQL RLS with USING + WITH CHECK + fail-closed null guard, explicit repository predicates, SQLAlchemy with-criteria) ensure organisations never share data
-- **Seven-role RBAC** — owner, administrator, workflow_builder, analyst, operator, viewer, auditor; permission checks enforced at router and service layers from a single hardcoded matrix; ordinary org members hold a nullable org role
-- **Two-step login** — credentials return a pre-auth session cookie and the available organisations; the user selects one to receive an org-scoped JWT; org membership is re-verified on every request
-- **Secure pre-auth session** — between login steps a single-purpose server-side session (stored by SHA-256 hash, issued as an HttpOnly cookie, 5-minute lifetime, consumed atomically) carries the authenticated user_id into step 2; the org-selection request body contains only `organisation_id` — user_id injection is structurally impossible
-- **Secure browser tokens** — access token in JavaScript memory, refresh token in HttpOnly Secure SameSite=Lax Path=/api/v1/auth cookie, CSRF double-submit cookie pattern (JS-readable `csrf_token` cookie + `X-CSRF-Token` header, bound to refresh session via HMAC-SHA256, Origin validated); no localStorage usage
-- **Knowledge retrieval** — hybrid vector + keyword search with access-control predicates applied inside queries; unauthorised chunks never reach reranking or model context
-- **Safe analytics** — validated read-only SQL against an allow-listed schema; no generated SQL for writes
-- **Typed workflow engine** — graph execution with checkpointing, retry budgets, cost limits and durable pause/resume
-- **Human approval gates** — write actions pause for approval; arguments shown to the approver are cryptographically bound to the arguments executed
-- **Tool registry** — every tool declares schema, risk level and approval requirement; unregistered tools cannot execute
-- **Policy engine** — deterministic guardrails outside model prompts; injection scanning is advisory, not a security boundary
-- **Complete audit trace** — append-only, INSERT-only at DB level; Phase 1A events written transactionally with the business operation; dashboards and exports in Phase 8
-- **Secure token design** — Argon2id passwords with pepper versioning, JWT access tokens, refresh-token families with rotation and reuse detection
-- **Composite FK pattern** — workspace-owned tables use `FOREIGN KEY (workspace_id, organisation_id) REFERENCES workspaces(id, organisation_id)` to enforce org-workspace consistency at the DB level
-- **Startup secret validation** — REPLACE_* placeholder values in required secrets cause a hard startup failure
-- **Evaluation suites** — real scores from real test cases; nothing fabricated
+- leaking data across organisations or workspaces
+- answering from general model knowledge when evidence is weak
+- treating retrieved documents as trusted instructions
+- leaving auth, tenancy, and audit trails as application afterthoughts
+
+AtlasCore addresses that by combining hybrid retrieval, evidence-gated answering, and PostgreSQL Row-Level Security (FORCE RLS) with a restricted application database role.
 
 ---
 
-## Quick start (local development)
+## Architecture
+
+```mermaid
+flowchart LR
+  Client[Client]
+  Next[Next.js]
+  API[FastAPI]
+  Auth[Auth / Tenant Context]
+  Services[Knowledge / Retrieval / Answer]
+  PG[(PostgreSQL + pgvector)]
+  Redis[(Redis)]
+  Providers[Model Providers]
+  Obs[Observability]
+
+  Client --> Next --> API --> Auth --> Services
+  Services --> PG
+  Services --> Redis
+  Services --> Providers
+  API --> Obs
+```
+
+Request flow in brief:
+
+1. Browser clients use the Next.js App Router UI.
+2. FastAPI serves `/api/v1/*` with org-scoped authentication.
+3. Tenant context is established for RLS before data access.
+4. Knowledge, retrieval, and answering services enforce workspace/org boundaries in SQL and application code.
+5. PostgreSQL (FTS + pgvector) and Redis hold durable data and short-lived session/cache state.
+6. Answer providers (deterministic test, OpenAI, or Anthropic) receive only constructed prompts with trusted instructions separated from untrusted evidence.
+7. Structured logging and OpenTelemetry configuration support local/runtime observability.
+
+Full design notes: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+---
+
+## Major capabilities (current)
+
+| Area | What is implemented |
+|------|---------------------|
+| Multi-tenant tenancy | Organisations, workspaces, invitations, teams |
+| AuthN / AuthZ | Two-step login, org-scoped JWTs, refresh-token families, CSRF on cookie refresh, seven-role RBAC |
+| Service access | Service accounts and API keys |
+| Knowledge ingestion | Sources, documents, chunking, embeddings, blob storage |
+| Hybrid retrieval | PostgreSQL FTS + pgvector cosine similarity, Reciprocal Rank Fusion (`k=60`), reranking |
+| Grounded answering | Evidence packets, sufficiency gating, abstention on low evidence, citation validation |
+| Prompt hygiene | Prompt-injection heuristics; trusted system instructions vs untrusted evidence separation |
+| Providers | `deterministic-test` (default), OpenAI, Anthropic |
+| Evaluation | Deterministic evaluation runner and case suites |
+| Audit | Append-oriented audit logging with restricted privileges |
+| Observability | Request/correlation hooks, structured logs, OpenTelemetry settings |
+
+### Planned (not claimed as shipped)
+
+Safe analytics SQL, workflow engine, tool registry / human approval gates, MCP server, and audit dashboards remain later phases (see [Project status](#project-status)).
+
+---
+
+## Security model
+
+AtlasCore treats tenancy and authorisation as database- and service-enforced controls.
+
+- **Database-enforced tenant isolation** — tenant-scoped tables use RLS policies with `USING` and `WITH CHECK`, including fail-closed behaviour when tenant context is unset.
+- **FORCE RLS** — policies apply even to table owners/privileged DB roles that would otherwise bypass RLS.
+- **Restricted application DB role** — the runtime role is not superuser and does not hold `CREATEROLE`, `CREATEDB`, or `BYPASSRLS`.
+- **Authentication / authorisation boundaries** — credentials yield a short-lived pre-auth session; org selection issues an org-scoped access token; membership and RBAC are re-checked on protected routes. Refresh tokens use family rotation with reuse detection. Browser refresh uses HttpOnly cookies plus CSRF double-submit.
+- **Audit controls** — security-relevant actions emit audit events; application privileges for audit mutation remain restricted.
+- **Controlled provider / tool boundaries** — retrieved content is evidence, not instructions; providers are not called when evidence is insufficient; provider failures must not leak secrets, stack traces, or system prompts.
+
+Public policy and reporting: [SECURITY.md](SECURITY.md). Threat model: [docs/SECURITY.md](docs/SECURITY.md).
+
+Do not commit secrets. Local credentials belong only in an untracked `.env` derived from `.env.example`.
+
+---
+
+## Knowledge ingestion and retrieval
+
+1. **Ingest** — documents are accepted into workspace-scoped sources, stored as blobs, parsed, chunked, and embedded.
+2. **Index** — lexical content is available to PostgreSQL full-text search; vectors are stored via pgvector.
+3. **Retrieve** — queries run hybrid lexical + vector search with access-control predicates inside SQL so unauthorised chunks never reach ranking or model context.
+4. **Fuse** — channel rankings are combined with Reciprocal Rank Fusion (`k=60`), then optionally reranked.
+5. **Return** — callers receive ranked chunks with scores suitable for grounded answering.
+
+---
+
+## Grounded AI answering
+
+The answering pipeline is evidence-first:
+
+1. Normalise the question and retrieve candidate evidence.
+2. Build an evidence packet and score sufficiency deterministically.
+3. Abstain when evidence is empty or below the configured band (low-evidence handling).
+4. Build a prompt with trusted instructions separated from untrusted evidence.
+5. Call the configured provider only when evidence is sufficient.
+6. Validate citations against retrieved evidence before returning an answer.
+
+Defaults favour the deterministic test provider (no external credentials). OpenAI and Anthropic are optional integrations.
+
+---
+
+## Evaluation system
+
+Deterministic evaluation cases exercise retrieval behaviour, abstention, citation handling, injection resistance, and provider-failure hygiene. The suite is runnable without live LLM credentials via the deterministic provider path.
+
+Verified baseline for this tag: **100% deterministic evaluation pass rate**.
+
+---
+
+## Observability
+
+- Structured application logging and request identification headers
+- OpenTelemetry-oriented configuration (`OTEL_*` settings) for traces/export wiring
+- Health and readiness endpoints for runtime checks
+
+Broader audit dashboards and production telemetry UX are planned for a later phase.
+
+---
+
+## Technology stack
+
+| Layer | Choice |
+|-------|--------|
+| API | FastAPI (Python 3.12) |
+| UI | Next.js 16 / TypeScript (Node 24) |
+| Database | PostgreSQL 16 + pgvector |
+| Cache / sessions | Redis |
+| Packaging | Docker Compose, `uv`, npm |
+| Providers | Deterministic test, OpenAI, Anthropic |
+| Quality | pytest, Ruff, mypy `--strict`, ESLint, `tsc` |
+
+---
+
+## Local development
 
 ### Prerequisites
 
 - Docker ≥ 24 and Docker Compose v2
 - Git
-- [nvm](https://github.com/nvm-sh/nvm) or Node.js 24 LTS directly (`.nvmrc` pins version 24)
-- [uv](https://github.com/astral-sh/uv) ≥ 0.5 (Python package manager)
-- Python 3.12 (`.python-version` pins this; `uv` will install it if needed)
+- [nvm](https://github.com/nvm-sh/nvm) or Node.js 24 (see `.nvmrc`)
+- [uv](https://github.com/astral-sh/uv) ≥ 0.5
+- Python 3.12 (see `.python-version`)
 
-### Clone and configure
+### Configure
 
 ```bash
 git clone https://github.com/your-org/atlascore.git
 cd atlascore
-
-# Use Node 24 if using nvm
 nvm use
-
-# Copy env template — replace REPLACE_* placeholders before starting.
-# At minimum, set: JWT_SECRET_KEY, ARGON2_PEPPER, REFRESH_TOKEN_PEPPER
-# Startup will fail with a clear error if any REPLACE_* value is present.
 cp .env.example .env
+# Replace every REPLACE_* secret before starting.
+# Startup fails if required placeholders remain.
 ```
 
-### Start services
+### Start
 
 ```bash
 docker compose up --build
 ```
 
-Services started:
+Local Compose binds services to loopback only (not public interfaces):
 
-| Service | Port |
-|---------|------|
-| Backend API | http://localhost:8000 |
-| Frontend | http://localhost:3000 |
-| PostgreSQL (pgvector) | localhost:5432 |
-| Redis | localhost:6379 |
-| API Docs | http://localhost:8000/docs |
+| Service | URL / port |
+|---------|------------|
+| Frontend | http://127.0.0.1:3100 |
+| Backend API | http://127.0.0.1:8100 |
+| API docs | http://127.0.0.1:8100/docs |
+| PostgreSQL | 127.0.0.1:5433 |
+| Redis | 127.0.0.1:6380 |
 
-### Seed the database
+Do not publish these ports on `0.0.0.0` for shared or internet-facing hosts without an explicit hardening plan.
+
+### Seed
 
 ```bash
 docker compose exec backend python scripts/seed.py
 ```
 
-### Run backend tests
+### Provider configuration
+
+```env
+ANSWER_PROVIDER=deterministic-test   # default — no credentials
+ANSWER_PROVIDER=openai               # requires OPENAI_API_KEY
+ANSWER_PROVIDER=anthropic            # requires ANTHROPIC_API_KEY
+ANSWER_DEMO_MODE=true                # force deterministic provider
+EMBEDDING_PROVIDER=mock              # default
+EMBEDDING_PROVIDER=openai            # requires OPENAI_API_KEY
+```
+
+---
+
+## Testing
+
+Backend (inside Compose / test stack):
 
 ```bash
+docker compose exec backend ruff check app tests scripts
+docker compose exec backend mypy --strict app
 docker compose exec backend pytest --cov=app tests/
 ```
 
-### Run lint and type checks
+Frontend (Node 24):
 
 ```bash
-docker compose exec backend ruff check app/
-docker compose exec backend mypy --strict app/
+cd frontend
+npm install
+npm run lint
+npm run type-check
+npm run build
 ```
 
-### Install backend dependencies locally (for IDE support)
+Optional aggregated gate (requires running Compose services):
 
 ```bash
-cd backend
-uv sync
+./scripts/quality-gate.sh
 ```
 
-### Run frontend build check
-
-```bash
-# Frontend build runs inside Docker to use Node 24:
-docker compose run --rm frontend npm run build
-
-# Or locally with Node 24:
-cd frontend && nvm use && npm ci && npm run build
-```
+Runtime security smoke (restricted DB role / FORCE RLS checks) lives in `backend/scripts/verify_runtime_security.py`.
 
 ---
 
-## AI provider configuration
-
-AtlasCore ships with a deterministic test provider that requires no credentials.
-This is the default for all CI runs and evaluation suites.
-
-```env
-# Grounded Q&A provider
-ANSWER_PROVIDER=deterministic-test   # default — no credentials, no network
-ANSWER_PROVIDER=openai               # requires OPENAI_API_KEY
-ANSWER_PROVIDER=anthropic            # requires ANTHROPIC_API_KEY
-
-# Force deterministic provider regardless of ANSWER_PROVIDER (safe for staging)
-ANSWER_DEMO_MODE=true
-```
-
-All deterministic responses are clearly labelled `"provider": "deterministic-test"`.
-Provider failures never expose API keys, stack traces, or system prompts to callers.
-
-The grounded answering pipeline:
-1. Never calls the provider if evidence is empty or below the sufficiency threshold.
-2. Never falls back to general model knowledge if evidence is insufficient.
-3. Never exposes storage keys or embedding vectors in API responses.
-4. Treats all retrieved evidence as untrusted data, never as instructions.
-
-### Embedding provider
-
-```env
-EMBEDDING_PROVIDER=mock      # default — no credentials
-EMBEDDING_PROVIDER=openai    # uses OPENAI_EMBEDDING_MODEL + OPENAI_API_KEY
-```
-
----
-
-## Repository structure
+## Project structure
 
 ```
 atlascore/
-├── backend/          FastAPI application (Python 3.12, uv)
-├── frontend/         Next.js 16.2.x App Router (Node 24)
-├── worker/           Background task worker (ARQ)
-├── mcp_server/       MCP protocol server
-├── evals/            Evaluation suites and datasets
-├── sample_data/      Seed SQL and seed documents
-├── docs/             Architecture, ADRs, security
-├── scripts/          Setup, seed, migration helpers
-├── infra/            Docker and CI configuration
-├── .nvmrc            Node.js version: 24
-├── .python-version   Python version: 3.12
-├── LICENSE           MIT
-├── PLAN.md           Phased implementation plan
-├── TASKS.md          Task registry and progress
-└── SECURITY.md       Threat model and security policy
+├── backend/           FastAPI app, Alembic migrations, pytest suite
+│   ├── app/           auth, knowledge, retrieval, answering, evaluations, API
+│   ├── scripts/       seed + runtime security verification
+│   └── tests/
+├── frontend/          Next.js App Router UI
+├── docs/              Architecture, ADRs, security threat model
+├── infra/docker/      DB init and related Docker assets
+├── scripts/           quality-gate helper
+├── docker-compose.yml Development stack (loopback-bound ports)
+├── PLAN.md            Phased implementation plan
+├── TASKS.md           Task registry
+├── SECURITY.md        Public security policy
+└── LICENSE            MIT
 ```
-
-**Note:** `uv.lock` and `package-lock.json` are generated in Phase 1A by
-`uv lock` and `npm install` respectively. They are committed after generation,
-not before. The repository does not contain hand-written stubs for these files.
 
 ---
 
-## Architecture overview
+## Security considerations
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system design.
-
-### Textual architecture diagram
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│  Browser (Next.js App Router)                                          │
-│  JWT in JS memory · refresh token in HttpOnly cookie · CSRF tokens     │
-└────────────────────┬───────────────────────────────────────────────────┘
-                     │  HTTPS + CORS allowlist
-┌────────────────────▼───────────────────────────────────────────────────┐
-│  FastAPI (Python 3.12)  — /api/v1/                                     │
-│  ┌─────────────┐  ┌──────────────┐  ┌────────────────────────────┐    │
-│  │  auth/      │  │  knowledge/  │  │  teams / members / invites  │    │
-│  │  2-step JWT │  │  CRUD+search │  │  RBAC (7 roles, hardcoded) │    │
-│  └─────────────┘  └──────┬───────┘  └────────────────────────────┘    │
-│                           │                                             │
-│  ┌────────────────────────▼───────────────────────────────────────┐    │
-│  │  Grounded Answering Pipeline (Phase 2C/2D)                     │    │
-│  │                                                                 │    │
-│  │  question → normalise → [Phase 2B retrieve] → EvidencePacket   │    │
-│  │            → sufficiency gate → PromptBuilder (trusted+untrust) │    │
-│  │            → AnswerProvider → CitationValidator → response      │    │
-│  │                                                                 │    │
-│  │  Providers: deterministic-test (default) · openai · anthropic   │    │
-│  │  Provider NEVER called with zero evidence                       │    │
-│  │  General knowledge fallback: NEVER                              │    │
-│  └────────────────────────────────────────────────────────────────┘    │
-│                                                                         │
-│  ┌────────────────────────────────────────────────────────────────┐    │
-│  │  Phase 2B Hybrid Retrieval                                     │    │
-│  │  lexical (PostgreSQL FTS) + vector (pgvector cosine)           │    │
-│  │  → RRF fusion → reranking → RetrievalResult[]                  │    │
-│  │  Access-control predicates inside SQL (RLS + explicit WHERE)   │    │
-│  └────────────────────────────────────────────────────────────────┘    │
-└───────────────────────┬────────────────────────────────────────────────┘
-                        │
-          ┌─────────────▼──────────────────┐
-          │  PostgreSQL 16 + pgvector       │
-          │  RLS: FORCE + fail-closed null  │
-          │  Composite FK workspace guard   │
-          │  Append-only audit log          │
-          └────────────────────────────────┘
-          ┌─────────────────────────────────┐
-          │  Redis                          │
-          │  Pre-auth sessions · caches     │
-          └─────────────────────────────────┘
-```
-
-Key principles:
-
-- Business logic lives in service classes, never in API routers or model prompts
-- Every tenant-scoped DB query is filtered by three independent layers: PostgreSQL RLS (USING + WITH CHECK, FORCE, fail-closed null guard), explicit repository WHERE clauses, and SQLAlchemy with-criteria
-- Knowledge retrieval access control is applied inside the SQL query — unauthorised chunks never reach reranking or model context
-- Workspace-owned tables use composite FKs to guarantee org-workspace consistency at the DB level
-- Login is two steps: credential verification returns available orgs; org selection issues an org-scoped JWT; org membership is re-verified on every request
-- Access tokens in JavaScript memory, refresh tokens in HttpOnly cookies, CSRF tokens required on state-changing requests
-- Retrieved documents are data, never system instructions; injection scanning is advisory, not the primary security boundary
-- Write actions require explicit authorisation and, where configured, human approval with argument-hash binding
-- All credentials are injected from environment; startup fails on REPLACE_* placeholders
-- Refresh tokens use a token-family design with rotation and reuse detection
-
-### Verification numbers (Phase 2D baseline)
-
-| Metric | Value |
-|--------|-------|
-| Evaluation cases | 46 (16 categories, A–P) |
-| Evaluation pass rate (deterministic baseline) | measured by `python -m app.evaluations.run` |
-| Grounding pipeline security properties | 10/10 verified (see Part F report) |
-| API endpoints (Phase 2A–2D) | 35+ |
-| Test files (backend) | 15+ |
-| Frontend pages (knowledge) | Sources, Search, Ask a Question |
+- Keep `.env` out of version control; only `.env.example` (placeholders) is tracked.
+- Replace all `REPLACE_*` values before startup.
+- Prefer loopback binds for local Postgres/Redis/API/UI.
+- Treat retrieved documents as untrusted data.
+- Injection heuristics are advisory; RLS, RBAC, and evidence gating are primary controls.
+- Report vulnerabilities privately per [SECURITY.md](SECURITY.md)—do not open public issues for sensitive findings.
 
 ---
 
-## Security
+## Verification
 
-See [SECURITY.md](SECURITY.md) for the security policy and [docs/SECURITY.md](docs/SECURITY.md) for the full threat model and mitigations.
+Verified on the `phase-2d-complete` baseline prior to this documentation pass:
 
-To report a vulnerability, email security@atlascore.example *(replace with real address)*.
+| Gate | Result |
+|------|--------|
+| Backend tests | 709 passed / 0 failed |
+| Deterministic evaluations | 100% pass rate |
+| Ruff | clean |
+| mypy `--strict` | clean across 90 source files |
+| Frontend lint | passed |
+| Frontend TypeScript / typecheck | passed |
+| Frontend build | passed |
+| Runtime security smoke | passed |
+| Public wildcard listeners | none observed |
+| PostgreSQL runtime role | no superuser / `CREATEROLE` / `CREATEDB` / `BYPASSRLS` |
+| FORCE RLS | enabled |
+| Exactly-one-owner invariant | enabled |
+| Audit privileges | restricted |
+
+This repository is the canonical source of truth for that baseline. Local reruns may require Docker, PostgreSQL, and Redis; if those services are unavailable, the previously verified runtime result remains authoritative.
 
 ---
 
-## Phases
+## Project status
 
 | Phase | Description | Status | Tag |
 |-------|-------------|--------|-----|
-| 0 | Foundation documents and architecture | ✅ Complete | phase-0-complete |
-| 1A | Core multi-tenant foundation (auth, orgs, RBAC, RLS) | ✅ Complete | phase-1a-complete |
-| 1B | Invitations, teams, service accounts, API keys | ✅ Complete | phase-1b-complete |
-| 2A | Knowledge ingestion (sources, documents, chunking, embeddings) | ✅ Complete | phase-2a-complete |
-| 2B | Hybrid retrieval (lexical + vector + RRF, secure predicates) | ✅ Complete | phase-2b-complete |
-| 2C | Grounded Q&A (abstention, citation, injection resistance) | ✅ Complete | phase-2c-complete |
-| 2D | Real LLM provider, evaluation framework, observability, UX polish | ✅ Complete | phase-2d-complete |
+| 0 | Foundation documents and architecture | Complete | `phase-0-complete` |
+| 1A | Multi-tenant foundation (auth, orgs, RBAC, RLS) | Complete | `phase-1a-complete` |
+| 1B | Invitations, teams, service accounts, API keys | Complete | `phase-1b-complete` |
+| 2A | Knowledge ingestion | Complete | `phase-2a-complete` |
+| 2B | Hybrid retrieval (FTS + pgvector + RRF) | Complete | `phase-2b-complete` |
+| 2C | Grounded Q&A | Complete | `phase-2c-complete` |
+| 2D | Providers, evaluation, observability hooks, UX polish | Complete | `phase-2d-complete` |
 | 3 | Safe analytics database | Planned | — |
 | 4 | Workflow engine | Planned | — |
 | 5 | Tool registry and approvals | Planned | — |
 | 6 | MCP integration | Planned | — |
 | 8 | Observability and audit dashboards | Planned | — |
 | 9 | Security hardening and deployment | Planned | — |
+
+AtlasCore is under active development. It is not presented here as a large-scale production deployment.
 
 ---
 
