@@ -550,6 +550,7 @@ def build_answer_provider(
     openai_model: str = "gpt-4o",
     openai_timeout: int = 60,
     openai_max_retries: int = 2,
+    openai_base_url: str = "",
     anthropic_api_key: str = "",
     anthropic_model: str = "claude-opus-4-5",
     anthropic_timeout: int = 60,
@@ -572,12 +573,15 @@ def build_answer_provider(
     if provider_id == "openai":
         if not openai_api_key:
             raise ValueError("ANSWER_PROVIDER=openai requires OPENAI_API_KEY to be set.")
-        return OpenAIAnswerProvider(
-            api_key=openai_api_key,
-            model=openai_model,
-            timeout_seconds=openai_timeout,
-            max_retries=openai_max_retries,
-        )
+        kwargs: dict[str, Any] = {
+            "api_key": openai_api_key,
+            "model": openai_model,
+            "timeout_seconds": openai_timeout,
+            "max_retries": openai_max_retries,
+        }
+        if openai_base_url:
+            kwargs["base_url"] = openai_base_url
+        return OpenAIAnswerProvider(**kwargs)
 
     if provider_id == "anthropic":
         if not anthropic_api_key:

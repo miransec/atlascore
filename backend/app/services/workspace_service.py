@@ -54,12 +54,37 @@ class WorkspaceService:
         session.add(workspace)
         await session.flush()
 
+        # Creator becomes workspace administrator in the same transaction so
+        # they can switch into the workspace without a second privileged call.
+        # Organisation membership is already required for WORKSPACE_CREATE.
+        creator_membership = WorkspaceMembership(
+            workspace_id=workspace.id,
+            organisation_id=organisation_id,
+            user_id=actor_user_id,
+            workspace_role="administrator",
+        )
+        session.add(creator_membership)
+        await session.flush()
+
         AuditService.emit_transactional(
             session,
             event_type="workspace.created",
             organisation_id=organisation_id,
             actor_user_id=actor_user_id,
             event_data={"workspace_id": str(workspace.id), "slug": slug},
+            request_id=request_id,
+            client_ip=client_ip,
+        )
+        AuditService.emit_transactional(
+            session,
+            event_type="workspace.membership_added",
+            organisation_id=organisation_id,
+            actor_user_id=actor_user_id,
+            event_data={
+                "workspace_id": str(workspace.id),
+                "target_user_id": str(actor_user_id),
+                "workspace_role": "administrator",
+            },
             request_id=request_id,
             client_ip=client_ip,
         )
@@ -127,6 +152,33 @@ class WorkspaceService:
             ws.description = description
         await session.flush()
         return ws
+
+    @staticmethod
+    async def list_members(
+        session: AsyncSession,
+        *,
+        workspace_id: uuid.UUID,
+        organisation_id: uuid.UUID,
+    ) -> list[WorkspaceMembership]:
+        """List workspace memberships for a workspace in the current organisation."""
+        ws_check = await session.execute(
+            select(Workspace.id).where(
+                Workspace.id == workspace_id,
+                Workspace.organisation_id == organisation_id,
+            )
+        )
+        if ws_check.scalar_one_or_none() is None:
+            raise WorkspaceServiceError("Workspace not found.")
+
+        result = await session.execute(
+            select(WorkspaceMembership)
+            .where(
+                WorkspaceMembership.workspace_id == workspace_id,
+                WorkspaceMembership.organisation_id == organisation_id,
+            )
+            .order_by(WorkspaceMembership.created_at)
+        )
+        return list(result.scalars().all())
 
     @staticmethod
     async def add_member(

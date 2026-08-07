@@ -1,348 +1,356 @@
 "use client";
 
-/**
- * Grounded Q&A page — /dashboard/answer
- *
- * Phase 2C: Ask a question, get an answer grounded entirely in the
- * workspace's knowledge base.
- *
- * Key properties:
- * - Answers are grounded in retrieved evidence only. The LLM is explicitly
- *   told NOT to use general knowledge.
- * - If evidence is insufficient, the system abstains — it does not guess.
- * - Each claim is traceable to a specific document chunk (citation).
- * - Evidence band (high/medium/low) is shown as a confidence indicator.
- *   This reflects retrieval signal quality, NOT model self-assessment.
- * - Provider failures return a safe generic message; no internals exposed.
- *
- * SECURITY:
- * - storage_key is never present in API response — it cannot be displayed.
- * - Embedding vectors are never returned — not in scope for this view.
- * - Provenance (source_name, document_title) comes from server-controlled
- *   EvidenceItems, never from the LLM output.
- * - Evidence content is rendered as plain text (not innerHTML) to prevent XSS.
- * - workspace_id used in the API call comes from the authenticated JWT.
- */
-
-import { FormEvent, useCallback, useRef, useState } from "react";
+import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import {
+  AlertTriangle,
+  Copy,
+  FolderOpen,
+  MessageSquareText,
+  Upload,
+} from "lucide-react";
+import {
+  PageHeader,
+  Button,
+  Textarea,
+  EmptyState,
+  StatusBadge,
+  ErrorState,
+} from "@/components/ui";
+import { useToast } from "@/components/ui/toast";
 import { useAuth } from "@/lib/auth-context";
-import { knowledge, AnswerResponse, AnswerCitation } from "@/lib/api";
-import { KnowledgeShell } from "@/components/KnowledgeShell";
+import {
+  ApiError,
+  knowledge,
+  type AnswerCitation,
+  type AnswerResponse,
+} from "@/lib/api";
+import { cn } from "@/lib/cn";
 
-// ---------------------------------------------------------------------------
-// Evidence band badge
-// ---------------------------------------------------------------------------
-
-function EvidenceBandBadge({ band }: { band: AnswerResponse["evidence_band"] }) {
-  const config: Record<string, { label: string; className: string }> = {
-    high: {
-      label: "High evidence quality",
-      className: "bg-green-50 text-green-700 ring-green-200",
-    },
-    medium: {
-      label: "Medium evidence quality",
-      className: "bg-yellow-50 text-yellow-700 ring-yellow-200",
-    },
-    low: {
-      label: "Low evidence quality",
-      className: "bg-orange-50 text-orange-700 ring-orange-200",
-    },
-    none: {
-      label: "No evidence",
-      className: "bg-gray-50 text-gray-500 ring-gray-200",
-    },
-  };
-  const c = config[band] ?? config.none;
-  return (
-    <span
-      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${c.className}`}
-      title="Evidence quality is derived from retrieval signals, not AI self-assessment."
-    >
-      {c.label}
-    </span>
-  );
+function bandTone(band: AnswerResponse["evidence_band"]) {
+  if (band === "high") return "success" as const;
+  if (band === "medium") return "accent" as const;
+  if (band === "low") return "warning" as const;
+  return "neutral" as const;
 }
 
-// ---------------------------------------------------------------------------
-// Citation card
-// ---------------------------------------------------------------------------
-
-function CitationCard({ citation }: { citation: AnswerCitation }) {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <div className="rounded-md border border-gray-200 bg-gray-50 p-3 text-sm">
-      <div className="flex items-start gap-2">
-        <span className="shrink-0 w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 text-xs font-bold flex items-center justify-center mt-0.5">
-          {citation.label}
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="font-medium text-gray-900 truncate">{citation.document_title}</p>
-          <p className="text-gray-500 text-xs">
-            {citation.source_name} · v{citation.version_number} · chunk {citation.chunk_index}
-          </p>
-          {citation.excerpt && (
-            <div className="mt-1.5">
-              {expanded ? (
-                <p className="text-gray-700 whitespace-pre-wrap break-words">
-                  {citation.excerpt}
-                </p>
-              ) : (
-                <p className="text-gray-600 line-clamp-2">{citation.excerpt}</p>
-              )}
-              <button
-                onClick={() => setExpanded((v) => !v)}
-                className="mt-1 text-xs text-indigo-600 hover:text-indigo-800"
-              >
-                {expanded ? "Show less" : "Show excerpt"}
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
+function renderAnswer(text: string) {
+  const parts = text.split(/(\[\d+\])/g);
+  return parts.map((part, i) => {
+    const m = part.match(/^\[(\d+)\]$/);
+    if (m) {
+      return (
+        <sup key={i} className="mx-0.5 font-semibold text-accent-hover">
+          [{m[1]}]
+        </sup>
+      );
+    }
+    return <span key={i}>{part}</span>;
+  });
 }
 
-// ---------------------------------------------------------------------------
-// Answer panel
-// ---------------------------------------------------------------------------
+export default function AskAiPage() {
+  const { user } = useAuth();
+  const toast = useToast();
+  const router = useRouter();
+  const [question, setQuestion] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [stage, setStage] = useState<"idle" | "retrieve" | "generate">("idle");
+  const [result, setResult] = useState<AnswerResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<AnswerCitation | null>(null);
 
-function AnswerPanel({ response }: { response: AnswerResponse }) {
-  const isAbstention =
-    response.status === "abstain_no_evidence" ||
-    response.status === "abstain_weak_evidence";
-  const isFailure = response.status === "provider_failure";
+  const canAsk = Boolean(user?.workspace_id) && question.trim().length > 0 && !loading;
 
-  // Render answer text with citation markers [1] highlighted.
-  // The text is split on citation patterns; they're rendered as superscripts.
-  function renderAnswerText(text: string) {
-    const parts = text.split(/(\[\d+\])/g);
-    return parts.map((part, i) => {
-      const match = part.match(/^\[(\d+)\]$/);
-      if (match) {
-        const num = parseInt(match[1], 10);
-        const citation = response.citations.find((c) => c.label === num);
-        return (
-          <sup
-            key={i}
-            title={citation ? `${citation.document_title} (${citation.source_name})` : ""}
-            className="ml-0.5 cursor-default rounded bg-indigo-100 px-1 py-0.5 text-indigo-700 text-xs font-medium"
-          >
-            {num}
-          </sup>
-        );
-      }
-      return <span key={i}>{part}</span>;
-    });
+  async function ask() {
+    if (!user?.workspace_id || !question.trim()) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    setSelected(null);
+    setStage("retrieve");
+    const stageTimer = window.setTimeout(() => setStage("generate"), 450);
+    try {
+      const res = await knowledge.answer(user.workspace_id, {
+        question: question.trim(),
+        top_k: 10,
+      });
+      setResult(res);
+      if (res.citations[0]) setSelected(res.citations[0]);
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? "We could not complete that request. Try again."
+          : "We could not complete that request. Try again.",
+      );
+    } finally {
+      window.clearTimeout(stageTimer);
+      setStage("idle");
+      setLoading(false);
+    }
+  }
+
+  const statusBadge = useMemo(() => {
+    if (!result) return null;
+    if (result.status === "answer") return <StatusBadge tone="success">Answer</StatusBadge>;
+    if (result.status === "provider_failure")
+      return <StatusBadge tone="danger">Provider unavailable</StatusBadge>;
+    return <StatusBadge tone="warning">Abstained</StatusBadge>;
+  }, [result]);
+
+  if (!user?.workspace_id) {
+    return (
+      <EmptyState
+        icon={MessageSquareText}
+        title="Select a workspace first"
+        description="Grounded answering requires an active workspace context."
+        actionLabel="Open workspaces"
+        onAction={() => router.push("/dashboard/workspaces")}
+      />
+    );
   }
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-      {/* Header bar */}
-      <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-gray-100 bg-gray-50">
-        <span className="text-sm font-medium text-gray-700">Answer</span>
-        <div className="flex items-center gap-2">
-          {response.evidence_band && response.status !== "provider_failure" && (
-            <EvidenceBandBadge band={response.evidence_band} />
-          )}
-          {response.suspicious_count > 0 && (
-            <span
-              className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200"
-              title={`${response.suspicious_count} evidence item(s) contained suspicious patterns and were flagged.`}
-            >
-              {response.suspicious_count} flagged
-            </span>
-          )}
-        </div>
-      </div>
+    <div className="animate-fade-in">
+      <PageHeader
+        title="Ask AI"
+        description="Answers are grounded only in retrieved workspace evidence. AtlasCore abstains when evidence is insufficient."
+      />
 
-      {/* Answer body */}
-      <div className="px-5 py-4">
-        {isAbstention || isFailure ? (
-          <p className="text-gray-600">{response.answer_text}</p>
-        ) : (
-          <p className="text-gray-900 leading-relaxed whitespace-pre-wrap">
-            {renderAnswerText(response.answer_text)}
-          </p>
-        )}
-      </div>
-
-      {/* Limitations */}
-      {response.limitations.length > 0 && (
-        <div className="px-5 pb-3">
-          {response.limitations.map((lim, i) => (
-            <p key={i} className="text-xs text-amber-700 bg-amber-50 rounded px-2 py-1 mt-1">
-              {lim}
-            </p>
-          ))}
-        </div>
-      )}
-
-      {/* Citations */}
-      {response.citations.length > 0 && (
-        <div className="px-5 pb-5">
-          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 mt-2">
-            Sources
-          </p>
-          <div className="space-y-2">
-            {response.citations.map((c) => (
-              <CitationCard key={c.citation_id} citation={c} />
-            ))}
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="space-y-4">
+          <div className="surface-card p-4">
+            <label className="mb-2 block text-xs font-medium uppercase tracking-wide text-muted">
+              Question
+            </label>
+            <Textarea
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              placeholder="Ask AtlasCore about your workspace knowledge"
+              rows={5}
+              maxLength={2000}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && canAsk) {
+                  e.preventDefault();
+                  void ask();
+                }
+              }}
+            />
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <p className="text-xs text-muted">⌘/Ctrl + Enter to submit</p>
+              <Button loading={loading} disabled={!canAsk} onClick={() => void ask()}>
+                Ask AtlasCore
+              </Button>
+            </div>
+            {loading ? (
+              <p className="mt-3 text-xs text-accent-hover animate-pulse-soft">
+                {stage === "retrieve" ? "Retrieving evidence…" : "Generating grounded answer…"}
+              </p>
+            ) : null}
           </div>
-        </div>
-      )}
 
-      {/* Observability footer */}
-      {response.provider && (
-        <div className="px-5 py-2 border-t border-gray-100 text-xs text-gray-400">
-          Provider: {response.provider}
-          {response.model ? ` · Model: ${response.model}` : ""}
+          {error ? <ErrorState description={error} onRetry={() => void ask()} /> : null}
+
+          {result ? (
+            <div className="surface-card animate-slide-up p-5">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                {statusBadge}
+                <StatusBadge tone={bandTone(result.evidence_band)}>
+                  Evidence {result.evidence_band}
+                </StatusBadge>
+                <span className="text-xs text-muted">
+                  {result.provider} · {result.model}
+                </span>
+              </div>
+
+              {result.status === "answer" ? (
+                <>
+                  <div className="prose-invert text-sm leading-relaxed text-foreground">
+                    {renderAnswer(result.answer_text)}
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={async () => {
+                        await navigator.clipboard.writeText(result.answer_text);
+                        toast.success("Answer copied");
+                      }}
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                      Copy answer
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setResult(null);
+                        setQuestion("");
+                      }}
+                    >
+                      Ask another question
+                    </Button>
+                  </div>
+                </>
+              ) : result.status === "provider_failure" ? (
+                <p className="text-sm text-muted">
+                  The answer provider is temporarily unavailable. No model internals were exposed.
+                  Try again shortly, or switch to the deterministic provider in server configuration.
+                </p>
+              ) : (
+                <div>
+                  <p className="text-sm text-muted">
+                    {result.status === "abstain_no_evidence"
+                      ? "No relevant workspace evidence was found for that question."
+                      : "Evidence was too weak to ground a reliable answer."}
+                  </p>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Button size="sm" onClick={() => router.push("/dashboard/documents")}>
+                      <Upload className="h-3.5 w-3.5" />
+                      Upload document
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => router.push("/dashboard/sources")}
+                    >
+                      <FolderOpen className="h-3.5 w-3.5" />
+                      Browse sources
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {result.suspicious_count > 0 ? (
+                <div className="mt-4 flex items-start gap-2 rounded-md border border-warning/30 bg-warning-soft px-3 py-2 text-xs text-warning">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  {result.suspicious_count} evidence item(s) matched prompt-injection heuristics.
+                  Content was still treated as untrusted data.
+                </div>
+              ) : null}
+
+              {result.limitations.length > 0 ? (
+                <div className="mt-4 border-t border-border pt-4">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-muted">
+                    Limitations
+                  </h3>
+                  <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-muted">
+                    {result.limitations.map((l) => (
+                      <li key={l}>{l}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {result.citations.length > 0 ? (
+                <div className="mt-4 border-t border-border pt-4 xl:hidden">
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+                    Citations
+                  </h3>
+                  <div className="space-y-2">
+                    {result.citations.map((c) => (
+                      <CitationBlock
+                        key={c.citation_id}
+                        citation={c}
+                        active={selected?.citation_id === c.citation_id}
+                        onSelect={() => setSelected(c)}
+                        onCopy={async () => {
+                          await navigator.clipboard.writeText(
+                            c.excerpt ?? `${c.document_title} [${c.label}]`,
+                          );
+                          toast.success("Citation copied");
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : !loading && !error ? (
+            <EmptyState
+              icon={MessageSquareText}
+              title="Ask AtlasCore about your workspace knowledge"
+              description="Questions are answered only from retrieved documents in the active workspace."
+            />
+          ) : null}
         </div>
-      )}
+
+        <aside className="hidden xl:block">
+          <div className="sticky top-20 surface-card max-h-[calc(100vh-7rem)] overflow-y-auto p-4 animate-slide-in-right">
+            <h2 className="text-sm font-semibold">Evidence</h2>
+            <p className="mt-1 text-xs text-muted">
+              Citations expand with provenance from retrieval — never from model memory.
+            </p>
+            <div className="mt-4 space-y-2">
+              {result?.citations?.length ? (
+                result.citations.map((c) => (
+                  <CitationBlock
+                    key={c.citation_id}
+                    citation={c}
+                    active={selected?.citation_id === c.citation_id}
+                    onSelect={() => setSelected(c)}
+                    onCopy={async () => {
+                      await navigator.clipboard.writeText(
+                        c.excerpt ?? `${c.document_title} [${c.label}]`,
+                      );
+                      toast.success("Citation copied");
+                    }}
+                  />
+                ))
+              ) : (
+                <p className="text-xs text-muted">Citations appear after a grounded answer.</p>
+              )}
+            </div>
+          </div>
+        </aside>
+      </div>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Main page
-// ---------------------------------------------------------------------------
-
-type PageState =
-  | { kind: "idle" }
-  | { kind: "loading" }
-  | { kind: "result"; response: AnswerResponse }
-  | { kind: "error"; message: string };
-
-export default function AnswerPage() {
-  const { user } = useAuth();
-  const workspaceId = user?.workspace_id ?? null;
-  const [question, setQuestion] = useState("");
-  const [topK, setTopK] = useState(10);
-  const [state, setState] = useState<PageState>({ kind: "idle" });
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-
-  const handleSubmit = useCallback(
-    async (e: FormEvent) => {
-      e.preventDefault();
-      const q = question.trim();
-      if (!q || !workspaceId) return;
-
-      setState({ kind: "loading" });
-      try {
-        const response = await knowledge.answer(workspaceId, {
-          question: q,
-          top_k: topK,
-        });
-        setState({ kind: "result", response });
-      } catch (err: unknown) {
-        const msg =
-          err instanceof Error ? err.message : "An unexpected error occurred.";
-        setState({ kind: "error", message: msg });
-      }
-    },
-    [question, topK, workspaceId],
-  );
-
-  const handleNewQuestion = useCallback(() => {
-    setState({ kind: "idle" });
-    setTimeout(() => inputRef.current?.focus(), 50);
-  }, []);
-
+function CitationBlock({
+  citation,
+  active,
+  onSelect,
+  onCopy,
+}: {
+  citation: AnswerCitation;
+  active?: boolean;
+  onSelect: () => void;
+  onCopy: () => void;
+}) {
   return (
-    <KnowledgeShell
-      heading="Ask a question"
-      description="Answers are grounded entirely in your workspace knowledge. If the evidence is insufficient, the system says so — it never guesses."
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cn(
+        "w-full rounded-md border p-3 text-left transition",
+        active
+          ? "border-accent/50 bg-accent-soft"
+          : "border-border bg-surface hover:border-accent/30",
+      )}
     >
-    <div className="max-w-3xl">
-      {/* Question form */}
-      {(state.kind === "idle" || state.kind === "error") && (
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label htmlFor="question" className="sr-only">
-              Question
-            </label>
-            <textarea
-              id="question"
-              ref={inputRef}
-              rows={4}
-              className="block w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-gray-900 shadow-sm placeholder:text-gray-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 sm:text-sm resize-none"
-              placeholder="e.g. What is the refund policy for enterprise customers?"
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              maxLength={2000}
-              autoFocus
-            />
-            <p className="mt-1 text-right text-xs text-gray-400">
-              {question.length}/2000
-            </p>
-          </div>
-
-          <div className="flex items-center gap-4">
-            <label
-              htmlFor="top_k"
-              className="text-sm text-gray-600 whitespace-nowrap"
-            >
-              Evidence candidates:
-            </label>
-            <select
-              id="top_k"
-              className="rounded border border-gray-300 px-2 py-1 text-sm text-gray-700 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              value={topK}
-              onChange={(e) => setTopK(Number(e.target.value))}
-            >
-              {[5, 10, 20, 30, 50].map((v) => (
-                <option key={v} value={v}>
-                  {v}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {state.kind === "error" && (
-            <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-700">
-              {state.message}
-            </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={!question.trim()}
-            className="inline-flex items-center rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            Get answer
-          </button>
-        </form>
-      )}
-
-      {/* Loading state */}
-      {state.kind === "loading" && (
-        <div className="flex flex-col items-center justify-center py-16 gap-3">
-          <div className="h-8 w-8 rounded-full border-4 border-indigo-200 border-t-indigo-600 animate-spin" />
-          <p className="text-sm text-gray-500">Searching knowledge base…</p>
-        </div>
-      )}
-
-      {/* Answer */}
-      {state.kind === "result" && (
-        <div className="space-y-4">
-          {/* Echo the question */}
-          <div className="rounded-lg bg-indigo-50 px-4 py-3">
-            <p className="text-sm font-medium text-indigo-900 italic">&ldquo;{question}&rdquo;</p>
-          </div>
-
-          <AnswerPanel response={state.response} />
-
-          <div className="flex gap-3">
-            <button
-              onClick={handleNewQuestion}
-              className="inline-flex items-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
-            >
-              Ask another question
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-    </KnowledgeShell>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-accent-hover">[{citation.label}]</span>
+        <button
+          type="button"
+          className="text-muted hover:text-foreground"
+          onClick={(e) => {
+            e.stopPropagation();
+            onCopy();
+          }}
+          aria-label="Copy citation"
+        >
+          <Copy className="h-3 w-3" />
+        </button>
+      </div>
+      <p className="mt-1 text-xs font-medium text-foreground">{citation.document_title}</p>
+      <p className="text-[11px] text-muted">
+        {citation.source_name} · v{citation.version_number} · chunk {citation.chunk_index}
+      </p>
+      {citation.excerpt ? (
+        <p className="mt-2 line-clamp-4 text-xs text-muted">{citation.excerpt}</p>
+      ) : null}
+    </button>
   );
 }

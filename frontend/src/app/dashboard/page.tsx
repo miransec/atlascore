@@ -1,172 +1,151 @@
 "use client";
 
-import { useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import {
+  Boxes,
+  FileText,
+  FolderOpen,
+  MessageSquareText,
+  Plus,
+  Upload,
+  UserPlus,
+} from "lucide-react";
+import { PageHeader, StatCard, Button, EmptyState, LoadingSkeleton, StatusBadge } from "@/components/ui";
 import { useAuth } from "@/lib/auth-context";
-import { auth, ApiError } from "@/lib/api";
+import { getHealth, knowledge, workspaces as workspacesApi, type Workspace } from "@/lib/api";
 
 export default function DashboardPage() {
-  const { user, signOut } = useAuth();
+  const { user } = useAuth();
   const router = useRouter();
-  const [loggingOut, setLoggingOut] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [ws, setWs] = useState<Workspace | null>(null);
+  const [sourceCount, setSourceCount] = useState(0);
+  const [docCount, setDocCount] = useState(0);
+  const [jobStats, setJobStats] = useState({ running: 0, failed: 0, succeeded: 0 });
+  const [provider, setProvider] = useState("—");
 
-  async function handleLogout() {
-    if (loggingOut) return;
-    setLoggingOut(true);
+  const load = useCallback(async () => {
+    if (!user?.workspace_id) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
     try {
-      await auth.logout();
-    } catch (err) {
-      // On network error or 401 (already expired) we still clear local state.
-      if (!(err instanceof ApiError)) {
-        console.error("Logout error:", err);
+      const [list, sources, docs, jobs, health] = await Promise.all([
+        workspacesApi.list(),
+        knowledge.listSources(user.workspace_id),
+        knowledge.listDocuments(user.workspace_id),
+        knowledge.listJobs(user.workspace_id),
+        getHealth().catch(() => null),
+      ]);
+      setWs(list.find((w) => w.id === user.workspace_id) ?? null);
+      setSourceCount(sources.length);
+      setDocCount(docs.length);
+      setJobStats({
+        running: jobs.filter((j) => j.status === "running" || j.status === "queued").length,
+        failed: jobs.filter((j) => j.status === "failed").length,
+        succeeded: jobs.filter((j) => j.status === "succeeded").length,
+      });
+      if (health) {
+        const demo = health.demo_mode === true || health.demo_mode === "true";
+        setProvider(demo ? `${health.answer_provider} (demo)` : health.answer_provider);
       }
     } finally {
-      signOut();
-      router.replace("/login");
+      setLoading(false);
     }
-  }
+  }, [user]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   if (!user) return null;
 
-  const roleLabel = user.org_role
-    ? user.org_role.replace(/_/g, " ")
-    : "Member";
-
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Top navigation bar */}
-      <header className="border-b border-gray-200 bg-white">
-        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
-          <span className="text-base font-bold tracking-tight text-gray-900">
-            AtlasCore
-          </span>
+    <div className="animate-fade-in">
+      <PageHeader
+        title={`Welcome, ${user.full_name.split(" ")[0]}`}
+        description={`Signed in to ${user.organisation_slug}. Grounded answers stay within your active workspace.`}
+        actions={
+          <Button onClick={() => router.push("/dashboard/answer")}>
+            <MessageSquareText className="h-4 w-4" />
+            Ask AtlasCore
+          </Button>
+        }
+      />
 
-          <div className="flex items-center gap-4">
-            {/* Organisation badge */}
-            <span className="hidden rounded-full bg-blue-50 px-3 py-0.5 text-xs font-medium text-blue-700 sm:inline-block">
-              {user.organisation_slug}
-            </span>
+      {!user.workspace_id ? (
+        <EmptyState
+          icon={Boxes}
+          title="No active workspace"
+          description="Create or switch into a workspace to unlock knowledge, search, and grounded answering."
+          actionLabel="Manage workspaces"
+          onAction={() => router.push("/dashboard/workspaces")}
+        />
+      ) : loading ? (
+        <LoadingSkeleton lines={6} />
+      ) : (
+        <>
+          <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <StatCard
+              label="Active workspace"
+              value={ws?.display_name ?? "—"}
+              hint={ws?.slug}
+              icon={Boxes}
+            />
+            <StatCard label="Sources" value={sourceCount} icon={FolderOpen} />
+            <StatCard label="Documents" value={docCount} icon={FileText} />
+            <StatCard
+              label="Ingestion"
+              value={`${jobStats.running} active`}
+              hint={`${jobStats.succeeded} succeeded · ${jobStats.failed} failed`}
+              icon={Upload}
+            />
+          </div>
 
-            {/* User info + logout */}
-            <div className="flex items-center gap-3">
-              <div className="hidden text-right sm:block">
-                <p className="text-sm font-medium text-gray-800">
-                  {user.full_name}
-                </p>
-                <p className="text-xs capitalize text-gray-500">{roleLabel}</p>
+          <div className="mb-6 grid gap-4 lg:grid-cols-3">
+            <div className="surface-card p-5 lg:col-span-2">
+              <h2 className="text-sm font-semibold">Quick actions</h2>
+              <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                {[
+                  { label: "Upload document", href: "/dashboard/documents", icon: Upload },
+                  { label: "Add source", href: "/dashboard/sources", icon: FolderOpen },
+                  { label: "Ask AtlasCore", href: "/dashboard/answer", icon: MessageSquareText },
+                  { label: "Invite member", href: "/dashboard/members", icon: UserPlus },
+                  { label: "Create workspace", href: "/dashboard/workspaces", icon: Plus },
+                ].map((a) => (
+                  <button
+                    key={a.href + a.label}
+                    type="button"
+                    onClick={() => router.push(a.href)}
+                    className="flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-3 text-left text-sm transition hover:-translate-y-0.5 hover:border-accent/40 hover:bg-surface-raised"
+                  >
+                    <a.icon className="h-4 w-4 text-accent-hover" />
+                    {a.label}
+                  </button>
+                ))}
               </div>
-              <button
-                onClick={handleLogout}
-                disabled={loggingOut}
-                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:border-gray-400 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {loggingOut ? "Signing out…" : "Sign out"}
-              </button>
+            </div>
+            <div className="surface-card space-y-4 p-5">
+              <h2 className="text-sm font-semibold">Provider status</h2>
+              <StatusBadge tone="success" pulse>
+                {provider}
+              </StatusBadge>
+              <p className="text-xs text-muted">
+                Answers are evidence-gated. The model is never called with insufficient
+                workspace evidence.
+              </p>
+              <h2 className="pt-2 text-sm font-semibold">Security summary</h2>
+              <ul className="space-y-2 text-xs text-muted">
+                <li>Organisation: {user.organisation_slug}</li>
+                <li>Role: {user.org_role ?? "member"}</li>
+                <li>Audit event APIs: not exposed in this release</li>
+              </ul>
             </div>
           </div>
-        </div>
-      </header>
-
-      {/* Main content area */}
-      <main className="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
-        {/* Welcome card */}
-        <div className="mb-8 rounded-xl border border-gray-200 bg-white p-8 shadow-sm">
-          <h1 className="text-2xl font-semibold text-gray-900">
-            Welcome back, {user.full_name.split(" ")[0]}
-          </h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Signed in to{" "}
-            <span className="font-medium text-gray-700">
-              {user.organisation_slug}
-            </span>{" "}
-            as{" "}
-            <span className="capitalize text-gray-700">{roleLabel}</span>.
-          </p>
-        </div>
-
-        {/* Platform admin indicator */}
-        {user.is_platform_admin && (
-          <div className="mb-8 rounded-xl border border-amber-200 bg-amber-50 px-6 py-4">
-            <p className="text-sm font-medium text-amber-800">
-              Platform administrator
-            </p>
-            <p className="mt-0.5 text-xs text-amber-700">
-              You have elevated privileges across all organisations.
-            </p>
-          </div>
-        )}
-
-        {/* Phase 1B admin cards */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {[
-            {
-              title: "Members",
-              description: "Manage organisation members and roles.",
-              href: "/dashboard/settings/members",
-            },
-            {
-              title: "Invitations",
-              description: "Send and revoke organisation invitations.",
-              href: "/dashboard/settings/invitations",
-            },
-            {
-              title: "Teams",
-              description: "Group members into teams for shared access.",
-              href: "/dashboard/settings/teams",
-            },
-            {
-              title: "Service Accounts",
-              description: "Non-human identities for API automation.",
-              href: "/dashboard/settings/service-accounts",
-            },
-            {
-              title: "Knowledge",
-              description: "Manage sources and ingested documents.",
-              href: "/dashboard/settings/knowledge",
-            },
-            {
-              title: "Knowledge Search",
-              description: "Search across ingested workspace knowledge.",
-              href: "/dashboard/search",
-            },
-            {
-              title: "Ask a Question",
-              description:
-                "Grounded Q&A — answers cited from workspace knowledge only.",
-              href: "/dashboard/answer",
-            },
-            {
-              title: "Workspaces",
-              description: "Manage AI workspaces and their configurations.",
-              href: null,
-            },
-            {
-              title: "Audit log",
-              description: "Review organisation activity and security events.",
-              href: null,
-            },
-          ].map((card) => (
-            <div
-              key={card.title}
-              className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm"
-            >
-              <h3 className="text-sm font-semibold text-gray-900">{card.title}</h3>
-              <p className="mt-1 text-xs text-gray-500">{card.description}</p>
-              {card.href ? (
-                <Link
-                  href={card.href}
-                  className="mt-4 inline-block text-xs font-medium text-indigo-600 hover:underline"
-                >
-                  Open →
-                </Link>
-              ) : (
-                <p className="mt-4 text-xs font-medium text-gray-400">Coming soon →</p>
-              )}
-            </div>
-          ))}
-        </div>
-      </main>
+        </>
+      )}
     </div>
   );
 }

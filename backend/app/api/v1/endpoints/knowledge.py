@@ -739,6 +739,7 @@ def _get_answer_service(settings: AppSettings) -> GroundedAnswerService:
         openai_model=settings.OPENAI_DEFAULT_CHAT_MODEL,
         openai_timeout=settings.OPENAI_TIMEOUT,
         openai_max_retries=settings.OPENAI_MAX_RETRIES,
+        openai_base_url=settings.OPENAI_BASE_URL,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
         anthropic_model=settings.ANTHROPIC_DEFAULT_CHAT_MODEL,
         anthropic_timeout=settings.ANTHROPIC_TIMEOUT,

@@ -20,7 +20,13 @@ import {
   ReactNode,
   useCallback,
 } from "react";
-import { auth, MeResponse, ApiError, clearAccessToken } from "@/lib/api";
+import {
+  auth,
+  me,
+  MeResponse,
+  ApiError,
+  clearAccessToken,
+} from "@/lib/api";
 
 interface AuthState {
   user: MeResponse | null;
@@ -32,6 +38,8 @@ interface AuthState {
   signOut: () => void;
   /** re-runs /auth/me (e.g. after org switch) */
   refresh: () => Promise<void>;
+  /** switch workspace via backend JWT, then refresh /auth/me */
+  switchWorkspace: (workspaceId: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -42,8 +50,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(async () => {
     try {
-      const me = await auth.me();
-      setUserState(me);
+      const profile = await auth.me();
+      setUserState(profile);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         setUserState(null);
@@ -51,6 +59,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     }
   }, []);
+
+  const switchWorkspace = useCallback(
+    async (workspaceId: string) => {
+      await me.switchWorkspace(workspaceId);
+      await refresh();
+    },
+    [refresh],
+  );
 
   useEffect(() => {
     refresh().finally(() => setLoading(false));
@@ -66,7 +82,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, setUser, signOut, refresh }}>
+    <AuthContext.Provider
+      value={{ user, loading, setUser, signOut, refresh, switchWorkspace }}
+    >
       {children}
     </AuthContext.Provider>
   );

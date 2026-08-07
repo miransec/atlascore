@@ -150,6 +150,9 @@ class Settings(BaseSettings):
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
     OPENAI_MAX_RETRIES: int = 3
     OPENAI_TIMEOUT: int = 60
+    # OpenAI-compatible chat completions URL. Override for gateways that speak
+    # the OpenAI Chat Completions API (e.g. a private proxy). Never log keys.
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1/chat/completions"
 
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_DEFAULT_CHAT_MODEL: str = "claude-opus-4-5"

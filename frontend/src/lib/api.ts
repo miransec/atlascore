@@ -452,7 +452,130 @@ export interface Workspace {
 export const workspaces = {
   list: () => apiFetch<Workspace[]>("/workspaces"),
   get: (id: string) => apiFetch<Workspace>(`/workspaces/${id}`),
+  create: (body: {
+    slug: string;
+    display_name: string;
+    description?: string | null;
+  }) => apiFetch<Workspace>("/workspaces", { method: "POST", body }),
+  update: (
+    id: string,
+    body: { display_name?: string; description?: string | null },
+  ) => apiFetch<Workspace>(`/workspaces/${id}`, { method: "PATCH", body }),
+  listMembers: (id: string) =>
+    apiFetch<WorkspaceMember[]>(`/workspaces/${id}/members`),
+  addMember: (id: string, body: { user_id: string; workspace_role: string }) =>
+    apiFetch<WorkspaceMember>(`/workspaces/${id}/members`, {
+      method: "POST",
+      body,
+    }),
+  removeMember: (id: string, userId: string) =>
+    apiFetch<void>(`/workspaces/${id}/members/${userId}`, { method: "DELETE" }),
 };
+
+export interface WorkspaceMember {
+  id: string;
+  user_id: string;
+  email: string;
+  full_name: string;
+  workspace_role: string;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Me context / workspace switch
+// ---------------------------------------------------------------------------
+
+export interface MeContext {
+  user_id: string;
+  organisation_id: string;
+  org_role: string | null;
+  organisation_slug: string;
+  organisation_display_name: string;
+  workspace_id: string | null;
+  workspace_role: string | null;
+  workspace_slug: string | null;
+}
+
+export interface SwitchWorkspaceResponse {
+  access_token: string;
+  expires_in: number;
+  organisation_id: string;
+  workspace_id: string;
+  workspace_role: string;
+}
+
+export const me = {
+  context: () => apiFetch<MeContext>("/me/context"),
+  switchWorkspace: async (workspace_id: string) => {
+    const data = await apiFetch<SwitchWorkspaceResponse>("/me/switch-workspace", {
+      method: "POST",
+      body: { workspace_id },
+    });
+    setAccessToken(data.access_token);
+    return data;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Organisations
+// ---------------------------------------------------------------------------
+
+export interface OrgMember {
+  id: string;
+  user_id: string;
+  email: string;
+  full_name: string;
+  org_role: string | null;
+  created_at?: string;
+}
+
+export interface OrganisationDetail {
+  id: string;
+  slug: string;
+  display_name: string;
+  is_active?: boolean;
+}
+
+export const organisations = {
+  getCurrent: () => apiFetch<OrganisationDetail>("/organisations/current"),
+  updateCurrent: (body: { display_name?: string }) =>
+    apiFetch<OrganisationDetail>("/organisations/current", {
+      method: "PATCH",
+      body,
+    }),
+  listMembers: () => apiFetch<OrgMember[]>("/organisations/current/members"),
+  changeMemberRole: (userId: string, org_role: string) =>
+    apiFetch<OrgMember>(`/organisations/current/members/${userId}/role`, {
+      method: "PATCH",
+      body: { org_role },
+    }),
+  removeMember: (userId: string) =>
+    apiFetch<void>(`/organisations/current/members/${userId}`, {
+      method: "DELETE",
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// Health (outside /api/v1)
+// ---------------------------------------------------------------------------
+
+export interface HealthResponse {
+  status: string;
+  version?: string;
+  answer_provider: string;
+  demo_mode: string | boolean;
+}
+
+export async function getHealth(): Promise<HealthResponse> {
+  const response = await fetch(`${API_BASE}/health`, {
+    credentials: "omit",
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new ApiError(response.status, data?.detail ?? "Health check failed");
+  }
+  return data as HealthResponse;
+}
 
 // ---------------------------------------------------------------------------
 // Phase 2A — Knowledge

@@ -146,6 +146,25 @@ class TestBuildAnswerProvider:
         assert isinstance(provider, AnthropicAnswerProvider)
         assert provider.provider_id == "anthropic"
 
+    def test_openai_with_custom_base_url(self) -> None:
+        custom = "https://gateway.example.com/v1/chat/completions"
+        provider = build_answer_provider(
+            "openai",
+            openai_api_key="sk-test-key-not-real",
+            openai_base_url=custom,
+        )
+        assert isinstance(provider, OpenAIAnswerProvider)
+        assert provider._base_url == custom
+
+    def test_openai_default_base_url_when_empty(self) -> None:
+        provider = build_answer_provider(
+            "openai",
+            openai_api_key="sk-test-key-not-real",
+            openai_base_url="",
+        )
+        assert isinstance(provider, OpenAIAnswerProvider)
+        assert "api.openai.com" in provider._base_url
+
     def test_unknown_provider_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown answer provider"):
             build_answer_provider("unknown-xyz")

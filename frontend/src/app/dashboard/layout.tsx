@@ -3,6 +3,8 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
+import { AppShell } from "@/components/shell";
+import { SkeletonBlock } from "@/components/ui/loading-skeleton";
 
 export default function DashboardLayout({
   children,
@@ -20,16 +22,17 @@ export default function DashboardLayout({
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
-        <p className="text-sm text-gray-500">Loading…</p>
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <div className="w-64 space-y-3">
+          <SkeletonBlock className="h-4 w-40" />
+          <SkeletonBlock className="h-3 w-full" />
+          <SkeletonBlock className="h-3 w-3/4" />
+        </div>
       </div>
     );
   }
 
-  if (!user) {
-    // Will redirect via the effect above; render nothing in the meantime.
-    return null;
-  }
+  if (!user) return null;
 
-  return <>{children}</>;
+  return <AppShell>{children}</AppShell>;
 }

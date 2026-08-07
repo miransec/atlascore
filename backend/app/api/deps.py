@@ -170,6 +170,14 @@ async def get_current_membership(
     # workspace while retaining org membership.  The workspace claims in the JWT
     # must not be trusted past the point where WorkspaceMembership is revoked.
     if payload.workspace_id is not None:
+        # Bootstrap workspace GUC from the verified JWT claim before the live
+        # membership read.  workspace_memberships RLS is org-scoped today, but
+        # setting the workspace context keeps the trust chain explicit and
+        # prevents fail-closed false negatives if policies are tightened later.
+        await db.execute(
+            text("SELECT set_config('app.current_workspace_id', :ws_id, true)"),
+            {"ws_id": str(payload.workspace_id)},
+        )
         ws_result = await db.execute(
             select(WorkspaceMembership).where(
                 WorkspaceMembership.workspace_id == payload.workspace_id,
@@ -234,6 +242,22 @@ async def get_validated_workspace_context(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Requested workspace does not match token workspace.",
         )
+
+    # Bootstrap transaction-local FORCE-RLS context from the verified JWT
+    # before reading WorkspaceMembership.  Without this, FORCE RLS with an
+    # unset org context fail-closes and hides live membership rows.
+    await db.execute(
+        text("SELECT set_config('app.current_organisation_id', :org_id, true)"),
+        {"org_id": str(payload.organisation_id)},
+    )
+    await db.execute(
+        text("SELECT set_config('app.current_user_id', :user_id, true)"),
+        {"user_id": str(payload.user_id)},
+    )
+    await db.execute(
+        text("SELECT set_config('app.current_workspace_id', :ws_id, true)"),
+        {"ws_id": str(workspace_id)},
+    )
 
     # Step 3: Live WorkspaceMembership check — revocation takes effect immediately.
     ws_result = await db.execute(

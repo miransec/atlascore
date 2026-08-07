@@ -31,7 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.refresh import RefreshTokenReuseError
-from app.db.models.membership import OrganisationMembership
+from app.db.models.membership import OrganisationMembership, WorkspaceMembership
 from app.db.models.organisation import Organisation
 from app.db.models.user import User
 from app.db.models.workspace import Workspace
@@ -103,6 +103,17 @@ async def test_register_creates_all_entities(
 
     # Default workspace exists
     result = await raw_db.execute(select(Workspace).where(Workspace.organisation_id == org.id))
+    workspace = result.scalar_one()
+    assert workspace is not None
+
+    # Creator is workspace administrator of the default workspace
+    result = await raw_db.execute(
+        select(WorkspaceMembership).where(
+            WorkspaceMembership.workspace_id == workspace.id,
+            WorkspaceMembership.user_id == user.id,
+            WorkspaceMembership.workspace_role == "administrator",
+        )
+    )
     assert result.scalar_one() is not None
 
 

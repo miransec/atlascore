@@ -158,6 +158,52 @@ async def update_workspace(
     )
 
 
+@router.get("/{workspace_id}/members", response_model=list[WorkspaceMembershipResponse])
+async def list_workspace_members(
+    workspace_id: uuid.UUID,
+    payload: CurrentPayload,
+    membership: CurrentMembership,
+    db: RawDB,
+    _perm: Annotated[None, Depends(RequirePermission(Permission.WORKSPACE_READ))],
+) -> list[WorkspaceMembershipResponse]:
+    try:
+        members = await WorkspaceService.list_members(
+            db,
+            workspace_id=workspace_id,
+            organisation_id=payload.organisation_id,
+        )
+    except WorkspaceServiceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    from sqlalchemy import select
+
+    from app.db.models.user import User
+
+    if not members:
+        return []
+
+    user_ids = [m.user_id for m in members]
+    user_result = await db.execute(select(User).where(User.id.in_(user_ids)))
+    users_by_id = {u.id: u for u in user_result.scalars().all()}
+
+    responses: list[WorkspaceMembershipResponse] = []
+    for wm in members:
+        user = users_by_id.get(wm.user_id)
+        if user is None:
+            continue
+        responses.append(
+            WorkspaceMembershipResponse(
+                id=wm.id,
+                user_id=user.id,
+                email=user.email,
+                full_name=user.full_name,
+                workspace_role=wm.workspace_role,
+                created_at=wm.created_at,
+            )
+        )
+    return responses
+
+
 @router.post("/{workspace_id}/members", status_code=status.HTTP_201_CREATED)
 async def add_workspace_member(
     request: Request,

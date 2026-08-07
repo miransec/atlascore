@@ -24,7 +24,7 @@ from app.auth.pre_auth import PreAuthSessionReuseError, PreAuthSessionService
 from app.auth.refresh import RefreshTokenReuseError, RefreshTokenService
 from app.auth.tokens import JWTService
 from app.db.models.auth import RefreshToken
-from app.db.models.membership import OrganisationMembership
+from app.db.models.membership import OrganisationMembership, WorkspaceMembership
 from app.db.models.organisation import Organisation
 from app.db.models.user import User
 from app.db.models.workspace import Workspace
@@ -147,6 +147,19 @@ class AuthService:
             is_active=True,
         )
         session.add(workspace)
+        await session.flush()
+
+        # Owner must be a workspace administrator of the default workspace so
+        # select-org / switch-workspace / knowledge routes work without a
+        # separate membership bootstrap step.
+        session.add(
+            WorkspaceMembership(
+                workspace_id=workspace.id,
+                organisation_id=org.id,
+                user_id=user.id,
+                workspace_role="administrator",
+            )
+        )
         await session.flush()
 
         # Audit — transactional, org context is the new org
